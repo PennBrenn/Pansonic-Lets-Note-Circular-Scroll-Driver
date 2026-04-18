@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""
+scrolldriver — circular touchpad scroll daemon
+Usage:
+  sudo scrolldriver          toggle on/off
+  sudo scrolldriver start    start the driver
+  sudo scrolldriver stop     stop the driver
+  sudo scrolldriver status   show current status
+  sudo scrolldriver config   show/edit settings
+"""
+
+import os, sys, signal, math, glob, time, json, threading
+from pathlib import Path
+
+# ── Paths ────────────────────────────────────────────────────────────── #
+PID_FILE    = Path("/tmp/scrolldriver.pid")
+CONFIG_FILE = Path.home() / ".config" / "circular-scroll" / "config.json"
+
+# ── Device constants ─────────────────────────────────────────────────── #
+PAD_SIZE      = 525
+CENTER        = PAD_SIZE / 2
+TOUCHPAD_NAME = "Synaptics TM3562-003"
+DEFAULTS      = {"inner_r": 170, "scroll_step_deg": 18, "settle_ms": 150}
+
+_PROP_POINTER = None   # resolved after evdev import
+_REL_HIRES    = None
+
+# ── ANSI colours ─────────────────────────────────────────────────────── #
+GRN  = "\033[92m"
+RED  = "\033[91m"
+YEL  = "\033[93m"
+CYN  = "\033[96m"
+DIM  = "\033[2m"
+RST  = "\033[0m"
+BOLD = "\033[1m"
+
+# ────────────────────────────────────────────────────────────────────── #
+def _load_config():
+    cfg = dict(DEFAULTS)
+    try:
+        if CONFIG_FILE.exists():
+            cfg.update(json.loads(CONFIG_FILE.read_text()))
+    except Exception:
+        pass
+    return cfg
+
+def _save_config(cfg):
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+
+def _find_touchpad():
+    from evdev import InputDevice, list_devices
+    for p in list_devices():
+        try:
+            if TOUCHPAD_NAME.lower() in InputDevice(p).name.lower():
+                return p
+        except Exception:
+            pass
+    return None
+
+def _find_x_env():
+    want = {"DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS"}
+    found = {k: os.environ[k] for k in want if k in os.environ}
+    if "DISPLAY" in found:
+        return found
+    for f in glob.glob("/proc/[0-9]*/environ"):
+        try:
+            pairs = {}
+            for e in open(f, "rb").read().split(b"\x00"):
+                if b"=" in e:
+                    k, v = e.decode(errors="replace").split("=", 1)
+                    pairs[k] = v
+            if "DISPLAY" in pairs:
+                return {k: pairs[k] for k in want if k in pairs}
+        except Exception:
+            pass
+    return {"DISPLAY": ":0"}
+
+# ── PID helpers ──────────────────────────────────────────────────────── #
+def _pid():
+    if not PID_FILE.exists():
+        return None
+    try:
+        pid = int(PID_FILE.read_text().strip())
+        os.kill(pid, 0)
+        return pid
+    except Exception:
+        PID_FILE.unlink(missing_ok=True)
+        return None
+
+# ── Daemon (child process) ───────────────────────────────────────────── #
+def _run_daemon():
+    """Full scroll driver loop — runs in background child process."""
+    from evdev import InputDevice, UInput, ecodes
+
+    global _PROP_POINTER, _REL_HIRES
+    _PROP_POINTER = getattr(ecodes, "INPUT_PROP_POINTER", 0x00)
+    _REL_HIRES    = getattr(ecodes, "REL_WHEEL_HI_RES",  0x0b)
+
+    path = _find_touchpad()
+    if not path:
+        sys.exit(1)
+
+    try:
+        pad = InputDevice(path)
+    except Exception:
+        sys.exit(1)
+
+    cap = {
+        ecodes.EV_KEY: [ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE],
+        ecodes.EV_REL: [ecodes.REL_X, ecodes.REL_Y, ecodes.REL_WHEEL, _REL_HIRES],
+    }
+    try:
+        ui = UInput(cap, name="circular-scroll", input_props=[_PROP_POINTER])
+    except Exception:
+        ui = None
+
+    for k, v in _find_x_env().items():
+        os.environ[k] = v
+
+    xd = xtest = X = None
+    try:
+        from Xlib import display as Xdisp, X as Xmod
+        from Xlib.ext import xtest as xtmod
+        xd    = Xdisp.Display()
+        X     = Xmod
+        xtest = xtmod
+    except Exception:
+        pass
+
+    # State
+    fingers    = {}
+    cur_slot   = 0
+    has_mt     = False
+    prev_angle = None
+    accum      = 0.0
+    zone_enter = None
+
+    def reset():
+        nonlocal prev_angle, accum, zone_enter
+        prev_angle = None
+        accum      = 0.0
+        zone_enter = None
+
+    def emit(value):
+        if xd:
+            btn = 5 if value < 0 else 4
+            xtest.fake_input(xd, X.ButtonPress,   btn)
+            xtest.fake_input(xd, X.ButtonRelease, btn)
+            xd.sync()
+        elif ui:
+            ui.write(ecodes.EV_REL, ecodes.REL_WHEEL, value)
+            ui.write(ecodes.EV_REL, _REL_HIRES, value * 120)
+            ui.syn()
+
+    def process():
+        nonlocal prev_angle, accum, zone_enter
+        cfg     = _load_config()
+        inner_r = cfg["inner_r"]
+        step    = math.radians(cfg["scroll_step_deg"])
+        settle  = cfg["settle_ms"] / 1000.0
+
+        valid = [f for f in fingers.values()
+                 if f["x"] is not None and f["y"] is not None]
+        if len(valid) != 1:
+            reset(); return
+
+        x, y = valid[0]["x"], valid[0]["y"]
+        if not (inner_r <= math.hypot(x - CENTER, y - CENTER) <= CENTER):
+            reset(); return
+
+        now = time.time()
+        if zone_enter is None:
+            zone_enter = now
+        if (now - zone_enter) < settle:
+            prev_angle = math.atan2(y - CENTER, x - CENTER)
+            return
+
+        angle = math.atan2(y - CENTER, x - CENTER)
+        if prev_angle is not None:
+            d = angle - prev_angle
+            if d >  math.pi: d -= 2 * math.pi
+            if d < -math.pi: d += 2 * math.pi
+            accum += d
+            while accum >= step:
+                emit(-1); accum -= step
+            while accum <= -step:
+                emit(1);  accum += step
+        prev_angle = angle
+
+    for ev in pad.read_loop():
+        if ev.type == ecodes.EV_ABS:
+            c = ev.code
+            if c == ecodes.ABS_MT_SLOT:
+                cur_slot = ev.value
+                if not has_mt:
+                    has_mt = True
+                    fingers.pop("s", None)
+            elif c == ecodes.ABS_MT_TRACKING_ID:
+                if ev.value == -1:
+                    fingers.pop(cur_slot, None); reset()
+                else:
+                    fingers[cur_slot] = {"x": None, "y": None}
+            elif c == ecodes.ABS_MT_POSITION_X:
+                if cur_slot in fingers:
+                    fingers[cur_slot]["x"] = ev.value
+            elif c == ecodes.ABS_MT_POSITION_Y:
+                if cur_slot in fingers:
+                    fingers[cur_slot]["y"] = ev.value
+        elif ev.type == ecodes.EV_SYN and ev.code == ecodes.SYN_REPORT:
+            process()
+
+# ── CLI actions ──────────────────────────────────────────────────────── #
+def do_start():
+    if _pid():
+        print(f"{YEL}Already running{RST}")
+        return
+    child = os.fork()
+    if child > 0:
+        time.sleep(0.4)
+        if _pid():
+            print(f"{GRN}{BOLD}● Circular scroll STARTED{RST}")
+        else:
+            print(f"{RED}Failed to start — check permissions{RST}")
+        return
+    # ── child ──
+    os.setsid()
+    PID_FILE.write_text(str(os.getpid()))
+    sys.stdout = open(os.devnull, "w")
+    sys.stderr = open(os.devnull, "w")
+    try:
+        _run_daemon()
+    except Exception:
+        pass
+    PID_FILE.unlink(missing_ok=True)
+    sys.exit(0)
+
+def do_stop():
+    pid = _pid()
+    if not pid:
+        print(f"{YEL}Not running{RST}")
+        return
+    os.kill(pid, signal.SIGTERM)
+    PID_FILE.unlink(missing_ok=True)
+    print(f"{RED}{BOLD}● Circular scroll STOPPED{RST}")
+
+def do_status():
+    pid = _pid()
+    cfg = _load_config()
+    if pid:
+        print(f"\n  {GRN}{BOLD}● ACTIVE{RST}  {DIM}(pid {pid}){RST}")
+    else:
+        print(f"\n  {RED}{BOLD}○ STOPPED{RST}")
+    print(f"\n  {CYN}Settings:{RST}")
+    print(f"    Inner radius   : {cfg['inner_r']} units")
+    print(f"    Speed          : {cfg['scroll_step_deg']}° per tick")
+    print(f"    Edge settle    : {cfg['settle_ms']} ms")
+    print()
+
+def do_config(args):
+    cfg = _load_config()
+    if not args:
+        print(f"\n  {CYN}Current settings{RST}  ({CONFIG_FILE})")
+        print(f"    inner_r        = {cfg['inner_r']}   (scroll zone inner radius, 60-240)")
+        print(f"    scroll_step_deg= {cfg['scroll_step_deg']}   (degrees of arc per tick, 5-60)")
+        print(f"    settle_ms      = {cfg['settle_ms']}  (edge delay in ms, 0-600)")
+        print(f"\n  {DIM}Edit:  sudo scrolldriver config inner_r=150 scroll_step_deg=12{RST}\n")
+        return
+    changed = False
+    for arg in args:
+        if "=" in arg:
+            k, v = arg.split("=", 1)
+            k = k.strip()
+            if k in cfg:
+                cfg[k] = int(v.strip())
+                changed = True
+                print(f"  {GRN}Set {k} = {cfg[k]}{RST}")
+            else:
+                print(f"  {YEL}Unknown key: {k}{RST}")
+    if changed:
+        _save_config(cfg)
+        pid = _pid()
+        if pid:
+            print(f"  {DIM}(settings take effect on next finger touch){RST}")
+
+def do_toggle():
+    if _pid():
+        do_stop()
+    else:
+        do_start()
+
+# ── Entry point ──────────────────────────────────────────────────────── #
+if __name__ == "__main__":
+    cmd = sys.argv[1].lower() if len(sys.argv) > 1 else "toggle"
+
+    if cmd in ("start",):
+        do_start()
+    elif cmd in ("stop",):
+        do_stop()
+    elif cmd in ("status", "st"):
+        do_status()
+    elif cmd in ("config", "cfg"):
+        do_config(sys.argv[2:])
+    elif cmd in ("toggle", "t"):
+        do_toggle()
+    else:
+        print(f"Usage: scrolldriver [start|stop|status|config|toggle]")
+        sys.exit(1)
