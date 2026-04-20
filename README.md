@@ -87,9 +87,6 @@ Auto-detects `Synaptics TM3562-003` by name — the device node (`/dev/input/eve
 | Device | Status |
 |---|---|
 | Panasonic CF-SV1 | ✅ Tested |
-| Panasonic CF-SZ6 / CF-SZ5 | ✅ Should work |
-| Panasonic CF-RZ6 / CF-RZ5 | ✅ Should work |
-| Panasonic CF-LX6 / CF-MX5 | ✅ Should work |
 | Any laptop with `Synaptics TM3562-003` | ✅ Should work |
 
 The driver auto-detects the touchpad by name. Any device reporting as `Synaptics TM3562-003` will work. Other circular trackpads can be supported by changing `TOUCHPAD_NAME` in the `scrolldriver` script.
