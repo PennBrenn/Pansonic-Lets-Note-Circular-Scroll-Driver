@@ -95,20 +95,24 @@ def _pid():
 
 # ── Daemon (child process) ───────────────────────────────────────────── #
 def _run_daemon():
-    """Full scroll driver loop — runs in background child process."""
+    """Full scroll driver loop — runs in foreground (used by systemd and fork child)."""
     from evdev import InputDevice, UInput, ecodes
 
     global _PROP_POINTER, _REL_HIRES
     _PROP_POINTER = getattr(ecodes, "INPUT_PROP_POINTER", 0x00)
     _REL_HIRES    = getattr(ecodes, "REL_WHEEL_HI_RES",  0x0b)
 
+    PID_FILE.write_text(str(os.getpid()))
+
     path = _find_touchpad()
     if not path:
+        PID_FILE.unlink(missing_ok=True)
         sys.exit(1)
 
     try:
         pad = InputDevice(path)
     except Exception:
+        PID_FILE.unlink(missing_ok=True)
         sys.exit(1)
 
     cap = {
@@ -229,6 +233,17 @@ def do_start():
     if _pid():
         print(f"{YEL}Already running{RST}")
         return
+    if SERVICE_FILE.exists():
+        try:
+            subprocess.run(["systemctl", "start", SERVICE_NAME], check=True, capture_output=True)
+            time.sleep(0.6)
+            if _pid():
+                print(f"{GRN}{BOLD}● Circular scroll STARTED{RST}")
+            else:
+                print(f"{RED}Failed to start — check: journalctl -u scrolldriver{RST}")
+        except Exception as e:
+            print(f"{RED}Failed to start: {e}{RST}")
+        return
     child = os.fork()
     if child > 0:
         time.sleep(0.4)
@@ -239,7 +254,6 @@ def do_start():
         return
     # ── child ──
     os.setsid()
-    PID_FILE.write_text(str(os.getpid()))
     sys.stdout = open(os.devnull, "w")
     sys.stderr = open(os.devnull, "w")
     try:
@@ -250,6 +264,14 @@ def do_start():
     sys.exit(0)
 
 def do_stop():
+    if SERVICE_FILE.exists():
+        try:
+            subprocess.run(["systemctl", "stop", SERVICE_NAME], check=True, capture_output=True)
+            PID_FILE.unlink(missing_ok=True)
+            print(f"{RED}{BOLD}● Circular scroll STOPPED{RST}")
+        except Exception as e:
+            print(f"{RED}Failed to stop: {e}{RST}")
+        return
     pid = _pid()
     if not pid:
         print(f"{YEL}Not running{RST}")
@@ -302,12 +324,16 @@ def _service_content():
     return (
         "[Unit]\n"
         "Description=Panasonic Let's Note Circular Scroll Driver\n"
-        "After=multi-user.target\n"
+        "After=multi-user.target udev.service\n"
+        "Wants=udev.service\n"
         "\n"
         "[Service]\n"
-        "Type=forking\n"
-        f"ExecStart={exe} start\n"
-        f"PIDFile={PID_FILE}\n"
+        "Type=simple\n"
+        f"ExecStart={exe} daemon\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n"
+        "StandardOutput=null\n"
+        "StandardError=null\n"
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"
@@ -347,6 +373,8 @@ if __name__ == "__main__":
         do_start()
     elif cmd in ("stop",):
         do_stop()
+    elif cmd in ("daemon",):
+        _run_daemon()
     elif cmd in ("status", "st"):
         do_status()
     elif cmd in ("config", "cfg"):
@@ -354,5 +382,5 @@ if __name__ == "__main__":
     elif cmd in ("toggle", "t"):
         do_toggle()
     else:
-        print(f"Usage: scrolldriver [start|stop|status|config|toggle]")
+        print(f"Usage: scrolldriver [start|stop|status|config|toggle|daemon]")
         sys.exit(1)
