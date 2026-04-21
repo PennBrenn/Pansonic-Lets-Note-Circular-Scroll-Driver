@@ -24,6 +24,9 @@ CENTER        = PAD_SIZE / 2
 TOUCHPAD_NAME = "Synaptics TM3562-003"
 DEFAULTS      = {"inner_r": 170, "scroll_step_deg": 18, "settle_ms": 150}
 
+_RAMP_SECS      = 0.25          # seconds to ease from 0 → full sensitivity after settle
+_MAX_FRAME_DEG  = 60            # max degrees a single frame may contribute (prevents jump overshoots)
+
 _PROP_POINTER = None   # resolved after evdev import
 _REL_HIRES    = None
 
@@ -137,12 +140,14 @@ def _run_daemon():
     prev_angle = None
     accum      = 0.0
     zone_enter = None
+    ramp_start = None
 
     def reset():
-        nonlocal prev_angle, accum, zone_enter
+        nonlocal prev_angle, accum, zone_enter, ramp_start
         prev_angle = None
         accum      = 0.0
         zone_enter = None
+        ramp_start = None
 
     def emit(value):
         if xd:
@@ -156,11 +161,12 @@ def _run_daemon():
             ui.syn()
 
     def process():
-        nonlocal prev_angle, accum, zone_enter
+        nonlocal prev_angle, accum, zone_enter, ramp_start
         cfg     = _load_config()
         inner_r = cfg["inner_r"]
         step    = math.radians(cfg["scroll_step_deg"])
         settle  = cfg["settle_ms"] / 1000.0
+        max_d   = math.radians(_MAX_FRAME_DEG)
 
         valid = [f for f in fingers.values()
                  if f["x"] is not None and f["y"] is not None]
@@ -183,7 +189,13 @@ def _run_daemon():
             d = angle - prev_angle
             if d >  math.pi: d -= 2 * math.pi
             if d < -math.pi: d += 2 * math.pi
-            accum += d
+            # Cap single-frame contribution to prevent jump overshoots
+            d = max(-max_d, min(max_d, d))
+            # Ease in: ramp sensitivity from 0 → 1 over _RAMP_SECS
+            if ramp_start is None:
+                ramp_start = now
+            ramp   = min(1.0, (now - ramp_start) / _RAMP_SECS)
+            accum += d * ramp
             while accum >= step:
                 emit(-1); accum -= step
             while accum <= -step:
