@@ -13,8 +13,9 @@ Turn the outer ring of your Panasonic Let's Note touchpad into a real scroll whe
 # 1. Install dependencies
 sudo pip3 install evdev python-xlib --break-system-packages
 
-# 2. Install the driver
-sudo cp scrolldriver /usr/local/bin/scrolldriver
+# 2. Install the driver (no repo clone needed)
+sudo curl -fsSL https://raw.githubusercontent.com/PennBrenn/Pansonic-Lets-Note-Circular-Scroll-Driver/main/scrolldriver \
+  -o /usr/local/bin/scrolldriver
 sudo chmod +x /usr/local/bin/scrolldriver
 
 # 3. Start it
