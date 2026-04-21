@@ -9,23 +9,18 @@ Usage:
   sudo scrolldriver config   show/edit settings
 """
 
-import os, sys, signal, math, glob, time, json, threading, subprocess
+import os, sys, signal, math, glob, time, json, threading
 from pathlib import Path
 
 # ── Paths ────────────────────────────────────────────────────────────── #
-PID_FILE        = Path("/tmp/scrolldriver.pid")
-CONFIG_FILE     = Path.home() / ".config" / "circular-scroll" / "config.json"
-SERVICE_FILE    = Path("/etc/systemd/system/scrolldriver.service")
-SERVICE_NAME    = "scrolldriver"
+PID_FILE    = Path("/tmp/scrolldriver.pid")
+CONFIG_FILE = Path.home() / ".config" / "circular-scroll" / "config.json"
 
 # ── Device constants ─────────────────────────────────────────────────── #
 PAD_SIZE      = 525
 CENTER        = PAD_SIZE / 2
 TOUCHPAD_NAME = "Synaptics TM3562-003"
 DEFAULTS      = {"inner_r": 170, "scroll_step_deg": 18, "settle_ms": 150}
-
-_RAMP_SECS      = 0.25          # seconds to ease from 0 → full sensitivity after settle
-_MAX_FRAME_DEG  = 60            # max degrees a single frame may contribute (prevents jump overshoots)
 
 _PROP_POINTER = None   # resolved after evdev import
 _REL_HIRES    = None
@@ -95,24 +90,20 @@ def _pid():
 
 # ── Daemon (child process) ───────────────────────────────────────────── #
 def _run_daemon():
-    """Full scroll driver loop — runs in foreground (used by systemd and fork child)."""
+    """Full scroll driver loop — runs in background child process."""
     from evdev import InputDevice, UInput, ecodes
 
     global _PROP_POINTER, _REL_HIRES
     _PROP_POINTER = getattr(ecodes, "INPUT_PROP_POINTER", 0x00)
     _REL_HIRES    = getattr(ecodes, "REL_WHEEL_HI_RES",  0x0b)
 
-    PID_FILE.write_text(str(os.getpid()))
-
     path = _find_touchpad()
     if not path:
-        PID_FILE.unlink(missing_ok=True)
         sys.exit(1)
 
     try:
         pad = InputDevice(path)
     except Exception:
-        PID_FILE.unlink(missing_ok=True)
         sys.exit(1)
 
     cap = {
@@ -144,14 +135,12 @@ def _run_daemon():
     prev_angle = None
     accum      = 0.0
     zone_enter = None
-    ramp_start = None
 
     def reset():
-        nonlocal prev_angle, accum, zone_enter, ramp_start
+        nonlocal prev_angle, accum, zone_enter
         prev_angle = None
         accum      = 0.0
         zone_enter = None
-        ramp_start = None
 
     def emit(value):
         if xd:
@@ -165,12 +154,11 @@ def _run_daemon():
             ui.syn()
 
     def process():
-        nonlocal prev_angle, accum, zone_enter, ramp_start
+        nonlocal prev_angle, accum, zone_enter
         cfg     = _load_config()
         inner_r = cfg["inner_r"]
         step    = math.radians(cfg["scroll_step_deg"])
         settle  = cfg["settle_ms"] / 1000.0
-        max_d   = math.radians(_MAX_FRAME_DEG)
 
         valid = [f for f in fingers.values()
                  if f["x"] is not None and f["y"] is not None]
@@ -193,13 +181,7 @@ def _run_daemon():
             d = angle - prev_angle
             if d >  math.pi: d -= 2 * math.pi
             if d < -math.pi: d += 2 * math.pi
-            # Cap single-frame contribution to prevent jump overshoots
-            d = max(-max_d, min(max_d, d))
-            # Ease in: ramp sensitivity from 0 → 1 over _RAMP_SECS
-            if ramp_start is None:
-                ramp_start = now
-            ramp   = min(1.0, (now - ramp_start) / _RAMP_SECS)
-            accum += d * ramp
+            accum += d
             while accum >= step:
                 emit(-1); accum -= step
             while accum <= -step:
@@ -233,17 +215,6 @@ def do_start():
     if _pid():
         print(f"{YEL}Already running{RST}")
         return
-    if SERVICE_FILE.exists():
-        try:
-            subprocess.run(["systemctl", "start", SERVICE_NAME], check=True, capture_output=True)
-            time.sleep(0.6)
-            if _pid():
-                print(f"{GRN}{BOLD}● Circular scroll STARTED{RST}")
-            else:
-                print(f"{RED}Failed to start — check: journalctl -u scrolldriver{RST}")
-        except Exception as e:
-            print(f"{RED}Failed to start: {e}{RST}")
-        return
     child = os.fork()
     if child > 0:
         time.sleep(0.4)
@@ -254,6 +225,7 @@ def do_start():
         return
     # ── child ──
     os.setsid()
+    PID_FILE.write_text(str(os.getpid()))
     sys.stdout = open(os.devnull, "w")
     sys.stderr = open(os.devnull, "w")
     try:
@@ -264,14 +236,6 @@ def do_start():
     sys.exit(0)
 
 def do_stop():
-    if SERVICE_FILE.exists():
-        try:
-            subprocess.run(["systemctl", "stop", SERVICE_NAME], check=True, capture_output=True)
-            PID_FILE.unlink(missing_ok=True)
-            print(f"{RED}{BOLD}● Circular scroll STOPPED{RST}")
-        except Exception as e:
-            print(f"{RED}Failed to stop: {e}{RST}")
-        return
     pid = _pid()
     if not pid:
         print(f"{YEL}Not running{RST}")
@@ -319,51 +283,11 @@ def do_config(args):
         if pid:
             print(f"  {DIM}(settings take effect on next finger touch){RST}")
 
-def _service_content():
-    exe = Path(os.path.realpath(sys.argv[0])).resolve()
-    return (
-        "[Unit]\n"
-        "Description=Panasonic Let's Note Circular Scroll Driver\n"
-        "After=multi-user.target udev.service\n"
-        "Wants=udev.service\n"
-        "\n"
-        "[Service]\n"
-        "Type=simple\n"
-        f"ExecStart={exe} daemon\n"
-        "Restart=on-failure\n"
-        "RestartSec=5\n"
-        "StandardOutput=null\n"
-        "StandardError=null\n"
-        "\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
-
-def _enable_autostart():
-    try:
-        SERVICE_FILE.write_text(_service_content())
-        subprocess.run(["systemctl", "daemon-reload"], check=True, capture_output=True)
-        subprocess.run(["systemctl", "enable", SERVICE_NAME], check=True, capture_output=True)
-        print(f"  {GRN}Autostart enabled (systemd){RST}")
-    except Exception as e:
-        print(f"  {YEL}Could not enable autostart: {e}{RST}")
-
-def _disable_autostart():
-    try:
-        subprocess.run(["systemctl", "disable", SERVICE_NAME], check=True, capture_output=True)
-        SERVICE_FILE.unlink(missing_ok=True)
-        subprocess.run(["systemctl", "daemon-reload"], check=True, capture_output=True)
-        print(f"  {DIM}Autostart disabled (systemd){RST}")
-    except Exception as e:
-        print(f"  {YEL}Could not disable autostart: {e}{RST}")
-
 def do_toggle():
     if _pid():
         do_stop()
-        _disable_autostart()
     else:
         do_start()
-        _enable_autostart()
 
 # ── Entry point ──────────────────────────────────────────────────────── #
 if __name__ == "__main__":
@@ -373,8 +297,6 @@ if __name__ == "__main__":
         do_start()
     elif cmd in ("stop",):
         do_stop()
-    elif cmd in ("daemon",):
-        _run_daemon()
     elif cmd in ("status", "st"):
         do_status()
     elif cmd in ("config", "cfg"):
@@ -382,5 +304,5 @@ if __name__ == "__main__":
     elif cmd in ("toggle", "t"):
         do_toggle()
     else:
-        print(f"Usage: scrolldriver [start|stop|status|config|toggle|daemon]")
+        print(f"Usage: scrolldriver [start|stop|status|config|toggle]")
         sys.exit(1)
