@@ -1,42 +1,35 @@
 # Panasonic Let's Note — Circular Scroll Driver
 
-A custom Linux driver for the circular trackpad found on Panasonic Let's Note laptops. Turns the outer ring of the touchpad into a real scroll wheel — clockwise to scroll down, counter-clockwise to scroll up.
-
-No extra hardware, no GUI, no DE integration required. Runs as a silent background daemon.
-
-## How It Works
-
-Draw a circle with one finger in the **outer ring** of your touchpad:
+Turn the outer ring of your Panasonic Let's Note touchpad into a real scroll wheel. No hardware mods, no GUI needed — just a silent background daemon.
 
 - **Clockwise** → Scroll Down
 - **Counter-clockwise** → Scroll Up
 
-The scroll zone is an annular ring from radius 170 to the edge (262 units). The driver tracks the angle of your finger in real time and converts accumulated rotation into X11 button 4/5 events — identical to a real scroll wheel.
+---
 
-## Installation
-
-### 1. Dependencies
+## ⚡ Quick Start
 
 ```bash
+# 1. Install dependencies
 sudo pip3 install evdev python-xlib --break-system-packages
-```
 
-### 2. Install the `scrolldriver` command
-
-```bash
+# 2. Install the driver
 sudo cp scrolldriver /usr/local/bin/scrolldriver
 sudo chmod +x /usr/local/bin/scrolldriver
+
+# 3. Start it
+sudo scrolldriver start
 ```
 
-### 3. (Optional) Start on login
+That's it. Draw a circle on the outer edge of your touchpad to scroll.
 
-Add this line to your sudoers file (`sudo visudo`) to allow passwordless start:
+---
 
-```
-penn ALL=(ALL) NOPASSWD: /usr/local/bin/scrolldriver
-```
+## How It Works
 
-Then add `sudo scrolldriver start` to your session autostart.
+The driver watches raw touchpad events and tracks your finger's angle inside an annular scroll zone (radius 170 → 262 units from centre). Every time you complete enough arc, it fires an X11 scroll event — identical to a real scroll wheel.
+
+A short settle delay (150 ms by default) prevents accidental scroll triggers when you move your finger to the edge of the pad.
 
 ## Usage
 
@@ -50,37 +43,36 @@ sudo scrolldriver config     # list all configurable settings
 
 ## Configuration
 
-Settings are stored in `~/.config/circular-scroll/config.json` and take effect immediately (no restart needed).
+Settings live in `~/.config/circular-scroll/config.json` and take effect immediately — no restart needed.
 
 ```bash
 # Show current settings
 sudo scrolldriver config
 
-# Change individual values
+# Change a value
 sudo scrolldriver config inner_r=150
 sudo scrolldriver config scroll_step_deg=12
 sudo scrolldriver config settle_ms=100
 
-# Multiple at once
+# Change multiple at once
 sudo scrolldriver config inner_r=160 scroll_step_deg=15 settle_ms=80
 ```
 
 | Setting | Default | Description |
 |---|---|---|
 | `inner_r` | `170` | Inner radius of the scroll zone (raw units, 60–240) |
-| `scroll_step_deg` | `18` | Degrees of arc required per scroll tick — lower = more sensitive |
-| `settle_ms` | `150` | Milliseconds your finger must stay in the zone before scrolling activates — prevents accidental triggers when moving to the edge |
+| `scroll_step_deg` | `18` | Degrees of arc per scroll tick — lower = more sensitive |
+| `settle_ms` | `150` | Delay before scrolling activates after entering the zone (ms) |
 
-## Files
+## Autostart on Login
 
-| File | Purpose |
-|---|---|
-| `scrolldriver` | Main driver — installed as system command |
-| `requirements.txt` | Python dependencies |
+Add this to your sudoers file (`sudo visudo`) to allow passwordless start:
 
-## Device
+```
+YOUR_USERNAME ALL=(ALL) NOPASSWD: /usr/local/bin/scrolldriver
+```
 
-Auto-detects `Synaptics TM3562-003` by name — the device node (`/dev/input/eventX`) is resolved automatically at each start, so it survives reboots even if the kernel assigns a different event number.
+Then add `sudo scrolldriver start` to your session autostart (e.g. autostart apps in your DE, or `~/.profile`).
 
 ## Supported Devices
 
@@ -89,7 +81,7 @@ Auto-detects `Synaptics TM3562-003` by name — the device node (`/dev/input/eve
 | Panasonic CF-SV1 | ✅ Tested |
 | Any laptop with `Synaptics TM3562-003` | ✅ Should work |
 
-The driver auto-detects the touchpad by name. Any device reporting as `Synaptics TM3562-003` will work. Other circular trackpads can be supported by changing `TOUCHPAD_NAME` in the `scrolldriver` script.
+The driver auto-detects the touchpad by name. To support a different circular trackpad, change `TOUCHPAD_NAME` in the `scrolldriver` script.
 
 ## License
 
