@@ -1,7 +1,5 @@
 # Panasonic Let's Note — Circular Scroll Driver
 
-Turn the outer ring of your Panasonic Let's Note touchpad into a real scroll wheel. No hardware mods, no GUI needed — just a silent background daemon.
-
 - **Clockwise** → Scroll Down
 - **Counter-clockwise** → Scroll Up
 
@@ -21,10 +19,16 @@ sudo chmod +x /usr/local/bin/scrolldriver
 # 3. Start it
 sudo scrolldriver start
 ```
-
-That's it. Draw a circle on the outer edge of your touchpad to scroll.
-
 ---
+
+## Supported Devices
+
+| Device | Status |
+|---|---|
+| Panasonic CF-SV1 | ✅ Tested |
+| Any laptop with `Synaptics TM3562-003` | ✅ Should work |
+
+The driver auto-detects the touchpad by name. To support a different circular trackpad, change `TOUCHPAD_NAME` in the `scrolldriver` script.
 
 ## How It Works
 
@@ -74,15 +78,6 @@ YOUR_USERNAME ALL=(ALL) NOPASSWD: /usr/local/bin/scrolldriver
 ```
 
 Then add `sudo scrolldriver start` to your session autostart (e.g. autostart apps in your DE, or `~/.profile`).
-
-## Supported Devices
-
-| Device | Status |
-|---|---|
-| Panasonic CF-SV1 | ✅ Tested |
-| Any laptop with `Synaptics TM3562-003` | ✅ Should work |
-
-The driver auto-detects the touchpad by name. To support a different circular trackpad, change `TOUCHPAD_NAME` in the `scrolldriver` script.
 
 ## License
 
