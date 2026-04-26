@@ -5,7 +5,7 @@
 
 ---
 
-## ⚡ Quick Start
+## Instillation
 
 ```bash
 # 1. Install dependencies
@@ -25,8 +25,8 @@ sudo scrolldriver start
 
 | Device | Status |
 |---|---|
-| Panasonic CF-SV1 | ✅ Tested |
-| Any laptop with `Synaptics TM3562-003` | ✅ Should work |
+| Panasonic CF-SV1 | Tested |
+| Any laptop with `Synaptics TM3562-003` | Should work |
 
 The driver auto-detects the touchpad by name. To support a different circular trackpad, change `TOUCHPAD_NAME` in the `scrolldriver` script.
 
